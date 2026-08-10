@@ -18,17 +18,19 @@ BANDWIDTH = 1000
 DELAY = '1ms'
 
 class SpineLeaf(Topo):
-    def __init__(self, n_spine=2, n_leaf=3, n_host=3, **opts):
+    def __init__(self, n_spine=2, n_leaf=3, n_host=3, use_real_dpid = True, **opts):
         super(SpineLeaf, self).__init__(**opts)
         spines = []
         leafs = []
+        dpids = NODES if use_real_dpid else list(range(1, n_spine + n_leaf + 1))
+        print(dpids)
         # Add spine switches
         for i in range(1, n_spine + 1):
-            spine = self.addSwitch(f's{i}', protocols='OpenFlow13', dpid=NODES[i-1])
+            spine = self.addSwitch(f's{i}', protocols='OpenFlow13', dpid=str(dpids[i-1]))
             spines.append(spine)
         # Add leaf switches
         for j in range(1, n_leaf + 1):
-            leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13', dpid=NODES[j+1])
+            leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13', dpid=str(dpids[j + n_spine - 1]))
             leafs.append(leaf)
             for spine_idx, spine in enumerate(spines, start=2):
                 self.addLink(leaf, spine, port1=spine_idx, port2=j + 1, bw=BANDWIDTH, delay=DELAY)
@@ -72,7 +74,7 @@ class FatTree(Topo):
                 host = self.addHost(f"h{host_id}", ip=ip)
                 self.addLink(host, edge, port2=12 + i, bw=BANDWIDTH, delay=DELAY)
 
-def build_network(topology: str = 'sl', controller_ip: str = "172.17.0.2", controller_port: int = 6653):
+def build_network(n_spine, n_leaf, n_host, topology: str = 'sl', controller_ip: str = "172.17.0.2", controller_port: int = 6653):
     match topology:
         case "sl":
             topo = SpineLeaf()
@@ -91,21 +93,25 @@ def main():
 
     parser = argparse.ArgumentParser(description="Define a topology in mininet.")
     parser.add_argument("-t", "--topology", type=str, default='sl',  help="Topology to test (Spine-leaf by default)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Print DPID of the switches created")
+    parser.add_argument("-V", "--verbose", action="store_true", help="Print DPID of the switches created")
+    parser.add_argument("--fake_dpid", action="store_false", help="Use false DPID for the switches (False by default)")
+    parser.add_argument("--n_spine", type=int, default=3, help="Number of spine switches (Only for spineleal, default 3)")
+    parser.add_argument("--n_leaf", type=int, default=2, help="Number of leaf switches (Only for spineleaf, default 2)")
+    parser.add_argument("--n_host", type=int, default=3, help="Number of host per leaf/edge switches. (3 by default)")
     args = parser.parse_args()
 
     match args.topology:
         case "sl":
-            topo = SpineLeaf()
+            topo = SpineLeaf(args.n_spine, args.n_leaf, args.n_host, args.fake_dpid)
         case "ft":
             topo = FatTree()
         case _:
             print(f"Topology {args.topology} don't exists.")
             return 0
 
+    controller = RemoteController('odl', ip="172.17.0.2", port=6653)
+    net = Mininet(topo=topo, link=TCLink, switch=OVSSwitch, controller=controller)
     try:
-        controller = RemoteController('odl', ip="172.17.0.2", port=6653)
-        net = Mininet(topo=topo, link=TCLink, switch=OVSSwitch, controller=controller)
         net.start()
         if args.verbose:
             for switch in net.switches:
