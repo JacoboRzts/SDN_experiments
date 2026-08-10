@@ -28,18 +28,19 @@ class SpineLeaf(Topo):
         for i in range(1, n_spine + 1):
             spine = self.addSwitch(f's{i}', protocols='OpenFlow13', dpid=str(dpids[i-1]))
             spines.append(spine)
+
         # Add leaf switches
         for j in range(1, n_leaf + 1):
             leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13', dpid=str(dpids[j + n_spine - 1]))
             leafs.append(leaf)
-            for spine_idx, spine in enumerate(spines, start=2):
-                self.addLink(leaf, spine, port1=spine_idx, port2=j + 1, bw=BANDWIDTH, delay=DELAY)
+            for spine in spines:
+                self.addLink(leaf, spine, bw=BANDWIDTH, delay=DELAY)
             # add host to all switches
             for k in range(1, n_host + 1):
                 host_id = (j-1) * n_host + k
                 ip = f"10.0.{j}.{k}/16"
                 host = self.addHost(f'h{host_id}', ip=ip)
-                self.addLink(host, leaf, port2=k+12, bw=BANDWIDTH, delay=DELAY)
+                self.addLink(host, leaf, bw=BANDWIDTH, delay=DELAY)
 
 class FatTree(Topo):
     def __init__(self, n_core: int = 1, n_aggr: int = 2, n_edge: int = 2, n_host: int = 4, **opts):
