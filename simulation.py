@@ -160,7 +160,9 @@ def _fmt(value, nd=2):
     if value is None:
         return "N/A"
     return f"{value:.{nd}f}"
-
+    cmd = f"iperf3 -s -p {port} -D"
+    server.cmd(cmd)
+    time.sleep(timeout)
 
 def _fmt_rsd(value):
     """Devuelve (texto, color) para un valor de RSD, o (N/A, None) si no aplica."""

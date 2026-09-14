@@ -22,16 +22,14 @@ class SpineLeaf(Topo):
         super(SpineLeaf, self).__init__(**opts)
         spines = []
         leafs = []
-        dpids = NODES if use_real_dpid else list(range(1, n_spine + n_leaf + 1))
-        print(dpids)
         # Add spine switches
         for i in range(1, n_spine + 1):
-            spine = self.addSwitch(f's{i}', protocols='OpenFlow13', dpid=str(dpids[i-1]))
+            spine = self.addSwitch(f's{i}', protocols='OpenFlow13')
             spines.append(spine)
 
         # Add leaf switches
         for j in range(1, n_leaf + 1):
-            leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13', dpid=str(dpids[j + n_spine - 1]))
+            leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13')
             leafs.append(leaf)
             for spine in spines:
                 self.addLink(leaf, spine, bw=BANDWIDTH, delay=DELAY)
