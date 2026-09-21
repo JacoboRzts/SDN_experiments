@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import atexit
 import json
+import shlex
 import statistics
 import subprocess
 import sys
@@ -20,6 +22,18 @@ DURATION      = 30       # Duración de cada corrida iperf3 (s)
 COOLDOWN      = 5        # Pausa entre reps dentro de un mismo pkt_size (s)
 PKT_PAUSE     = 10       # Pausa al cambiar de pkt_size (s)
 PROTO_PAUSE   = 20       # Pausa al cambiar de protocolo TCP -> UDP (s)
+
+# --- Arranque sincronizado ---
+# SSH viaja por la misma red que se está saturando, así que NUNCA se usa mientras
+# corre el tráfico de prueba. Cada rep tiene 3 fases:
+#   1) ARMAR   (red en reposo): se le manda a cada cliente el comando con una hora
+#              de arranque absoluta; el cliente espera hasta esa hora.
+#   2) CORRER  (sin SSH): todos los clientes disparan a la vez y guardan su JSON
+#              en un archivo local en el propio cliente.
+#   3) RECOGER (red otra vez en reposo): se lee el JSON de cada cliente por SSH.
+START_LEAD    = 4.0      # Segundos entre "armar" y el disparo simultáneo (s)
+COLLECT_GRACE = 30       # Espera máx. tras DURATION a que el cliente termine (s)
+REMOTE_TMP    = "/tmp"   # Carpeta del cliente donde deja su JSON/código de salida
 
 # --- Criterio de convergencia (RSD sobre throughput) ---
 RSD_TARGET    = 10.0     # % objetivo de RSD para dar por convergido
@@ -142,6 +156,9 @@ TOPOLOGIES = {
 
 HOSTS: Dict[str, Dict[str, str]] = {}   # Se llena en main() desde TOPOLOGIES[topo]["hosts"]
 
+# ControlMaster/ControlPersist: la 1ª conexión a cada host queda abierta y todas
+# las siguientes viajan por ella. Así, durante la prueba no se negocia ningún
+# handshake SSH nuevo (que es lo que fallaba con la red saturada).
 _SSH_OPTS = [
     "ssh",
     "-i", str(KEY_PATH),
@@ -149,6 +166,10 @@ _SSH_OPTS = [
     "-o", "ConnectTimeout=10",
     "-o", "BatchMode=yes",
     "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=6",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPath=/tmp/physical-ssh-%C",
+    "-o", "ControlPersist=2h",
 ]
 
 
@@ -180,6 +201,66 @@ def kill_iperf_all(pairs: List[dict]) -> None:
     hosts = {p["client"] for p in pairs} | {p["server"] for p in pairs}
     for h in hosts:
         kill_iperf(h)
+
+
+def close_masters() -> None:
+    """Cierra las conexiones SSH persistentes (se registra con atexit en main)."""
+    for h in HOSTS.values():
+        try:
+            subprocess.run(_SSH_OPTS + ["-O", "exit", f"{h['user']}@{h['ip']}"],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SINCRONIZACIÓN DE RELOJES
+# ══════════════════════════════════════════════════════════════════════════════
+
+CLOCK_OFFSET: Dict[str, float] = {}   # reloj_remoto - reloj_local, en segundos
+
+
+def measure_offset(host_key: str, samples: int = 7) -> Optional[float]:
+    """
+    Desfase (reloj del host - reloj de esta PC) en segundos, compensando la
+    latencia de red: se toman varias muestras y se conserva la de menor RTT,
+    que es la que menos error de ida/vuelta arrastra. Retorna None si ninguna
+    muestra fue válida.
+
+    No hace falta que los relojes estén sincronizados por NTP: el desfase medido
+    se compensa al calcular la hora de arranque de cada cliente.
+    """
+    best = None   # (rtt, offset)
+    for _ in range(samples):
+        t0 = time.time()
+        try:
+            res = ssh_run(host_key, "date +%s.%N", timeout=10)
+        except subprocess.TimeoutExpired:
+            continue
+        t1 = time.time()
+        if res.returncode != 0:
+            continue
+        try:
+            remote = float(res.stdout.strip())
+        except ValueError:
+            continue
+        rtt = t1 - t0
+        if best is None or rtt < best[0]:
+            best = (rtt, remote - (t0 + t1) / 2)
+    return best[1] if best else None
+
+
+def refresh_offsets(pairs: List[dict], samples: int = 7) -> None:
+    """Mide el desfase de reloj de cada cliente (llamar con la red en reposo)."""
+    parts = []
+    for name in sorted({p["client"] for p in pairs}):
+        off = measure_offset(name, samples)
+        if off is None:
+            print(f"  WARN no se pudo medir el reloj de {name}; se asume desfase 0")
+            off = 0.0
+        CLOCK_OFFSET[name] = off
+        parts.append(f"{name}={off * 1000:+.1f}")
+    print(f"  Desfase de reloj vs esta PC (ms): {'  '.join(parts)}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -285,7 +366,8 @@ def extract_metrics(data: dict, proto: str) -> Dict[str, Optional[float]]:
 
 def inject_meta(data: dict, pair: dict, pkt_size: int, rep: int,
                 topology: str, experiment: str, note: str,
-                proto: str, metrics: Dict[str, Optional[float]]) -> dict:
+                proto: str, metrics: Dict[str, Optional[float]],
+                sync: Optional[dict] = None) -> dict:
     """
     Añade el bloque _meta al JSON crudo de iperf3.
     Incluye todo lo necesario para reconstruir la corrida sin depender del nombre
@@ -308,6 +390,7 @@ def inject_meta(data: dict, pair: dict, pkt_size: int, rep: int,
         "timestamp_utc":          datetime.now(timezone.utc).isoformat(),
         "note":                   note,
         "metrics":                metrics,
+        "sync":                   sync,
     }
     return data
 
@@ -338,6 +421,56 @@ def build_client_cmd(pair: dict, pkt_size: int, proto: str) -> str:
         raise ValueError(f"Protocolo desconocido: {proto}")
 
 
+def _remote_tag(topology: str, experiment: str, proto: str, pair: dict) -> str:
+    """Prefijo de los archivos temporales que el cliente deja en REMOTE_TMP."""
+    return f"physical_{topology}_{experiment}_{proto}_{pair['id']}"
+
+
+def build_armed_cmd(pair: dict, pkt_size: int, proto: str,
+                    t_remote: float, tag: str) -> str:
+    """
+    Comando (para ssh_run) que deja al cliente ARMADO y vuelve de inmediato:
+      - borra resultados de la rep anterior,
+      - en background espera hasta `t_remote` (epoch según el reloj del CLIENTE),
+      - lanza iperf3 volcando el JSON a {REMOTE_TMP}/{tag}.json,
+      - al terminar escribe el código de salida en {REMOTE_TMP}/{tag}.rc.
+    Nada de esto usa la red una vez armado, así que SSH no compite con el tráfico.
+    """
+    out = f"{REMOTE_TMP}/{tag}.json"
+    err = f"{REMOTE_TMP}/{tag}.err"
+    rc  = f"{REMOTE_TMP}/{tag}.rc"
+    t_ns = int(round(t_remote * 1e9))
+
+    script = (
+        # espera activa (paso de 5 ms) hasta la hora de arranque, en ns enteros
+        f'while [ "$(date +%s%N)" -lt {t_ns} ]; do sleep 0.005; done; '
+        f"{build_client_cmd(pair, pkt_size, proto)} > {out} 2> {err}; "
+        f"echo $? > {rc}"
+    )
+    return (f"rm -f {out} {err} {rc}; "
+            f"nohup sh -c {shlex.quote(script)} >/dev/null 2>&1 </dev/null &")
+
+
+def collect_result(host_key: str, tag: str, deadline: float):
+    """
+    Sondea al cliente hasta que exista su archivo .rc (o se cumpla `deadline`) y
+    devuelve (rc_iperf3, json_crudo). Se llama con la red ya en reposo.
+    """
+    rc  = f"{REMOTE_TMP}/{tag}.rc"
+    out = f"{REMOTE_TMP}/{tag}.json"
+    cmd = f"[ -s {rc} ] && cat {rc} {out}"
+    while time.time() < deadline:
+        try:
+            res = ssh_run(host_key, cmd, timeout=15)
+            if res.returncode == 0 and res.stdout.strip():
+                first, _, body = res.stdout.partition("\n")
+                return int(first.strip()), body
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(1)
+    raise TimeoutError(f"el cliente no terminó antes del deadline ({tag})")
+
+
 def start_servers(pairs: List[dict], proto: str) -> None:
     """Mata iperf3 previo, lanza un server por par, espera a que escuchen."""
     kill_iperf_all(pairs)
@@ -349,11 +482,14 @@ def start_servers(pairs: List[dict], proto: str) -> None:
 
 def run_single_pair(pair: dict, pkt_size: int, rep: int, topology: str,
                     experiment: str, note: str, proto: str, out_dir: Path,
-                    results: dict, errors: list) -> None:
+                    results: dict, errors: list,
+                    t_start: float, tag: str, sync: dict) -> None:
     """
-    Ejecuta iperf3 en un par (cliente->servidor), parsea el JSON, extrae
-    métricas y escribe el archivo. Diseñado para correr en un thread propio
-    junto con otros pares del mismo escenario.
+    Recoge el resultado de un par que YA fue armado por run_rep. Diseñado para
+    correr en un thread propio junto con los demás pares del escenario.
+
+    No toca la red mientras dura la prueba: duerme hasta t_start + DURATION y
+    recién entonces (red en reposo) pregunta al cliente por su JSON.
     """
     fname = (
         f"{topology}_{experiment}_{proto}"
@@ -363,61 +499,115 @@ def run_single_pair(pair: dict, pkt_size: int, rep: int, topology: str,
     )
     fpath = out_dir / fname
 
-    cmd = build_client_cmd(pair, pkt_size, proto)
-
     try:
-        res = ssh_run(pair["client"], cmd, timeout=DURATION + 20)
+        time.sleep(max(0.0, t_start + DURATION - time.time()))
+        rc, body = collect_result(pair["client"], tag,
+                                  deadline=t_start + DURATION + COLLECT_GRACE)
 
-        if res.returncode != 0 or not res.stdout.strip():
-            errors.append(
-                f"{pair['id']} [{proto}]: iperf3 rc={res.returncode} "
-                f"stderr={res.stderr.strip()[:120]}"
-            )
+        if rc != 0 or not body.strip():
+            # iperf3 -J reporta sus errores dentro del JSON ("error": "..."),
+            # no por stderr; se intenta leer de ahí para saber la causa real.
+            detail = ""
+            try:
+                detail = str(json.loads(body).get("error", "")) if body.strip() else ""
+            except json.JSONDecodeError:
+                pass
+            if not detail:
+                r = ssh_run(pair["client"],
+                            f"head -c 200 {REMOTE_TMP}/{tag}.err", timeout=10)
+                detail = r.stdout.strip()
+            errors.append(f"{pair['id']} [{proto}]: iperf3 rc={rc} — {detail[:150]}")
             results[pair["id"]] = None
             return
 
-        data = json.loads(res.stdout)
+        data = json.loads(body)
         metrics = extract_metrics(data, proto)
         data = inject_meta(data, pair, pkt_size, rep, topology,
-                           experiment, note, proto, metrics)
+                           experiment, note, proto, metrics, sync)
         fpath.write_text(json.dumps(data, indent=2))
         results[pair["id"]] = metrics.get("throughput_mbps")
 
-    except subprocess.TimeoutExpired:
-        errors.append(f"{pair['id']} [{proto}]: timeout SSH tras {DURATION + 20}s")
+    except TimeoutError as e:
+        errors.append(f"{pair['id']} [{proto}]: {e}")
         results[pair["id"]] = None
-        kill_iperf(pair["client"])
+        try:
+            kill_iperf(pair["client"])
+        except Exception:
+            pass
     except json.JSONDecodeError as e:
         errors.append(f"{pair['id']} [{proto}]: JSON inválido — {e}")
         results[pair["id"]] = None
     except Exception as e:
         errors.append(f"{pair['id']} [{proto}]: {type(e).__name__} — {e}")
         results[pair["id"]] = None
-        kill_iperf(pair["client"])
+        try:
+            kill_iperf(pair["client"])
+        except Exception:
+            pass
 
 
 def run_rep(pairs: List[dict], pkt_size: int, rep: int, topology: str,
             experiment: str, note: str, proto: str,
             out_dir: Path) -> List[Optional[float]]:
     """
-    Lanza todos los pares en paralelo (un thread por par), espera a que terminen
-    y devuelve la lista de throughputs en Mbps (None si falló el par).
+    Ejecuta una repetición con arranque simultáneo:
+      1) ARMAR: fija una hora común (t_start, reloj de esta PC) y deja a cada
+         cliente esperándola, ya convertida a SU reloj con el offset medido.
+      2) CORRER: los clientes disparan solos a la vez; aquí no se usa SSH.
+      3) RECOGER: un thread por par lee el JSON cuando la red vuelve a estar libre.
+    Devuelve la lista de throughputs en Mbps (None si falló el par).
     """
     results: Dict[str, Optional[float]] = {}
     errors: List[str] = []
 
+    # --- 1) ARMAR (red en reposo) ---
+    t_start = time.time() + START_LEAD
+    armed: List[dict] = []
+    tags: Dict[str, str] = {}
+    syncs: Dict[str, dict] = {}
+
+    for p in pairs:
+        tag = _remote_tag(topology, experiment, proto, p)
+        off = CLOCK_OFFSET.get(p["client"], 0.0)
+        cmd = build_armed_cmd(p, pkt_size, proto, t_start + off, tag)
+        try:
+            res = ssh_run(p["client"], cmd, timeout=10)
+            ok, why = res.returncode == 0, res.stderr.strip()[:100]
+        except subprocess.TimeoutExpired:
+            ok, why = False, "timeout SSH"
+        if ok:
+            armed.append(p)
+            tags[p["id"]] = tag
+            syncs[p["id"]] = {
+                "start_target_utc": datetime.fromtimestamp(
+                    t_start, timezone.utc).isoformat(),
+                "clock_offset_s":   round(off, 6),
+                "start_lead_s":     START_LEAD,
+            }
+        else:
+            errors.append(f"{p['id']} [{proto}]: no se pudo armar el cliente ({why})")
+            results[p["id"]] = None
+
+    slack = t_start - time.time()
+    if slack < 0.2:
+        errors.append(
+            f"arranque tardío ({-slack * 1000:.0f} ms pasada la hora): "
+            f"los pares no arrancaron juntos; sube START_LEAD")
+
+    # --- 2) y 3) CORRER + RECOGER ---
     threads = [
         threading.Thread(
             target=run_single_pair,
             args=(p, pkt_size, rep, topology, experiment, note, proto,
-                  out_dir, results, errors),
+                  out_dir, results, errors, t_start, tags[p["id"]],
+                  syncs[p["id"]]),
         )
-        for p in pairs
+        for p in armed
     ]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=DURATION + 35)
+        t.join(timeout=START_LEAD + DURATION + COLLECT_GRACE + 15)
 
     for err in errors:
         print(f"    WARN {err}")
@@ -491,6 +681,7 @@ def run_sweep(pairs: List[dict], topology: str, experiment: str, sizes: list[int
         throughputs_per_rep: List[float] = []
 
         start_servers(pairs, proto)
+        refresh_offsets(pairs)   # red en reposo: también calienta el SSH persistente
 
         rep = 1
         converged = False
@@ -704,6 +895,7 @@ def main() -> None:
     # --- Inicializar HOSTS globalmente según topología elegida ---
     global HOSTS
     HOSTS = TOPOLOGIES[args.topology]["hosts"]
+    atexit.register(close_masters)
 
     # --- Resolver lista de experimentos y protocolos ---
     experiments = ALL_EXPERIMENTS if args.experiment == "all" else [args.experiment]
