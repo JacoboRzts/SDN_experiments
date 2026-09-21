@@ -27,7 +27,9 @@ REPS_MIN      = 15       # Mínimo de reps antes de evaluar convergencia
 REPS_MAX      = 30       # Máximo de reps (corte duro aunque no converja)
 
 # --- Barrido ---
-PKT_SIZES     = [64, 128, 256, 512, 1024]   # Bytes de payload iperf3 (-l)
+PKT_SIZES     = [64, 128, 256, 512, 1024, 1400]   # Bytes de payload iperf3 (-l)
+UDP_MAXSIZE = 1472
+TCP_MAXSIZE = 1460
 PROTOCOLS     = ["tcp", "udp"]              # Orden: TCP primero, luego UDP
 
 # --- Parámetros por protocolo ---
@@ -36,8 +38,7 @@ UDP_BITRATE    = "1g"       # -b 1g  (line-rate físico del testbed) 1 Gb/s Igua
 
 # --- Infraestructura ---
 KEY_PATH    = Path.home() / ".ssh" / "id_rsa_testbed"
-OUTPUT_BASE = Path.home() / "experimentos"
-
+OUTPUT_BASE = Path.home() / "resultados" / datetime.now().strftime("%d%m%Y")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  DEFINICIÓN DE EXPERIMENTOS
@@ -71,8 +72,8 @@ TOPOLOGIES = {
         "desc": "Spine-Leaf (SL) — port-pinning estático S1/S2",
         "hosts": {
             "H1": {"ip": "10.0.1.1", "user": "h1", "leaf": "L1"},
-            "H2": {"ip": "10.0.1.2", "user": "h2", "leaf": "L1"},
-            "H3": {"ip": "10.0.1.3", "user": "h3", "leaf": "L1"},
+            "H2": {"ip": "10.0.1.2", "user": "becarios", "leaf": "L1"},
+            "H3": {"ip": "10.0.1.3", "user": "becarios", "leaf": "L1"},
             "H4": {"ip": "10.0.2.1", "user": "h4", "leaf": "L2"},
             "H5": {"ip": "10.0.2.2", "user": "h5", "leaf": "L2"},
             "H6": {"ip": "10.0.2.3", "user": "h6", "leaf": "L2"},
@@ -81,22 +82,22 @@ TOPOLOGIES = {
         },
         "pairs": {
             "a1": [
-                {"id": "p1", "client": "H1", "server": "H4", "port": 5201},  # L1 -> L2
+                {"id": "p1", "client": "H1", "server": "H5", "port": 5201},  # L1 -> L2
             ],
             "a2": [
-                {"id": "p1", "client": "H1", "server": "H4", "port": 5201},  # L1 -> L2
-                {"id": "p2", "client": "H2", "server": "H5", "port": 5202},  # L1 -> L2
+                {"id": "p1", "client": "H1", "server": "H5", "port": 5201},  # L1 -> L2
+                {"id": "p2", "client": "H2", "server": "H6", "port": 5202},  # L1 -> L2
             ],
             "a3": [
-                {"id": "p1", "client": "H1", "server": "H4", "port": 5201},  # L1 -> L2
-                {"id": "p2", "client": "H2", "server": "H5", "port": 5202},  # L1 -> L2
+                {"id": "p1", "client": "H1", "server": "H5", "port": 5201},  # L1 -> L2
+                {"id": "p2", "client": "H2", "server": "H6", "port": 5202},  # L1 -> L2
                 {"id": "p3", "client": "H3", "server": "H7", "port": 5203},  # L1 -> L3
             ],
             "a4": [
-                {"id": "p1", "client": "H1", "server": "H4", "port": 5201},  # L1 -> L2
-                {"id": "p2", "client": "H2", "server": "H5", "port": 5202},  # L1 -> L2
+                {"id": "p1", "client": "H1", "server": "H5", "port": 5201},  # L1 -> L2
+                {"id": "p2", "client": "H2", "server": "H6", "port": 5202},  # L1 -> L2
                 {"id": "p3", "client": "H3", "server": "H7", "port": 5203},  # L1 -> L3
-                {"id": "p4", "client": "H6", "server": "H8", "port": 5204},  # L2 -> L3
+                {"id": "p4", "client": "H4", "server": "H8", "port": 5204},  # L2 -> L3
             ],
         },
     },
@@ -104,8 +105,8 @@ TOPOLOGIES = {
         "desc": "Jerárquica 3 Capas (J3C) — todos los pares cruzan Core1",
         "hosts": {
             "H1": {"ip": "10.0.1.1", "user": "h1", "edge": "E1"},
-            "H2": {"ip": "10.0.1.2", "user": "h2", "edge": "E1"},
-            "H3": {"ip": "10.0.1.3", "user": "h3", "edge": "E1"},
+            "H2": {"ip": "10.0.1.2", "user": "becarios", "edge": "E1"},
+            "H3": {"ip": "10.0.1.3", "user": "becarios", "edge": "E1"},
             "H4": {"ip": "10.0.1.4", "user": "h4", "edge": "E1"},
             "H5": {"ip": "10.0.2.1", "user": "h5", "edge": "E2"},
             "H6": {"ip": "10.0.2.2", "user": "h6", "edge": "E2"},
@@ -324,12 +325,12 @@ def build_client_cmd(pair: dict, pkt_size: int, proto: str) -> str:
     """Comando iperf3 para el cliente, según protocolo."""
     srv_ip = HOSTS[pair["server"]]["ip"]
     base = (f"iperf3 -c {srv_ip} -p {pair['port']}"
-            f" -t {DURATION} -l {pkt_size} -J")
+            f" -t {DURATION} -l {pkt_size} -J -Z")
 
     if proto == "tcp":
         # -Z: zero-copy (sendfile) para no ser cuello de botella en el kernel.
         # -C cubic: congestion control explícito.
-        return f"{base} -Z -C {TCP_CONGESTION}"
+        return f"{base} -C {TCP_CONGESTION}"
     elif proto == "udp":
         # -u: UDP. -b: bitrate objetivo (line-rate físico del testbed).
         return f"{base} -u -b {UDP_BITRATE}"
@@ -438,6 +439,7 @@ def _print_header(experiment: str, topology: str, pairs: List[dict],
     print(f"  {experiment.upper()}  |  Topología: {topology.upper()}")
     print(f"  {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"  Descripción: {exp_config['desc']}")
+    print(f"  Output: {out_dir}")
     print(f"  Protocolos:  {PROTOCOLS}  (orden de ejecución)")
     print(f"  TCP CC:      {TCP_CONGESTION}   |   UDP bitrate: {UDP_BITRATE}")
     print(f"  Cooldown:    {COOLDOWN}s  |  Pkt-pause: {PKT_PAUSE}s  ")
@@ -467,7 +469,7 @@ def _print_summary_table(experiment: str, topology: str,
     print(f"{'='*70}\n")
 
 
-def run_sweep(pairs: List[dict], topology: str, experiment: str,
+def run_sweep(pairs: List[dict], topology: str, experiment: str, sizes: list[int],
               note: str, proto: str, out_dir: Path) -> Dict[int, dict]:
     """
     Barrido de PKT_SIZES para un protocolo dado. Para cada pkt_size:
@@ -481,7 +483,9 @@ def run_sweep(pairs: List[dict], topology: str, experiment: str,
     print(f"#  PROTOCOLO: {proto.upper()}")
     print(f"{'#'*70}\n")
 
-    for pkt_size in PKT_SIZES:
+    for pkt_size in sizes:
+        if pkt_size == 1400:
+            pkt_size = UDP_MAXSIZE if proto == "udp" else TCP_MAXSIZE
         print(f"-- PKT {pkt_size:>4d} B  [{proto}]  " + "-"*44)
 
         throughputs_per_rep: List[float] = []
@@ -545,7 +549,7 @@ def run_sweep(pairs: List[dict], topology: str, experiment: str,
     return summary
 
 
-def run_experiment(experiment: str, topology: str, protocols: List[str],
+def run_experiment(experiment: str, topology: str, protocols: List[str], sizes: List[int],
                    output_dir_override: Optional[Path] = None) -> None:
     """
     Orquesta un experimento completo: itera todos los protocolos pedidos,
@@ -565,7 +569,7 @@ def run_experiment(experiment: str, topology: str, protocols: List[str],
     if output_dir_override is not None:
         out_dir = output_dir_override
     else:
-        out_dir = OUTPUT_BASE / topology / "fase1_linerate"
+        out_dir = OUTPUT_BASE / topology
     out_dir.mkdir(parents=True, exist_ok=True)
 
     _print_header(experiment, topology, pairs, out_dir)
@@ -573,7 +577,7 @@ def run_experiment(experiment: str, topology: str, protocols: List[str],
     summary: Dict[str, Dict[int, dict]] = {}
 
     for i, proto in enumerate(protocols):
-        summary[proto] = run_sweep(pairs, topology, experiment,
+        summary[proto] = run_sweep(pairs, topology, experiment, sizes,
                                    note, proto, out_dir)
 
         # Pausa entre protocolos (no después del último)
@@ -678,6 +682,12 @@ def main() -> None:
         help="Protocolo(s) a evaluar. 'both' = TCP primero, luego UDP.",
     )
     parser.add_argument(
+        '--sizes',
+        default="64,128,256,512,1024,1400",
+        type=str,
+        help="List of the packet sizes to use."
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -699,10 +709,17 @@ def main() -> None:
     experiments = ALL_EXPERIMENTS if args.experiment == "all" else [args.experiment]
     protocols = _resolve_protocols(args.protocol)
 
+    sizes = list(map(int, args.sizes.split(',')))
+    for size in sizes:
+        if size not in PKT_SIZES:
+            print(f"Size {size} is not permitted")
+            return
+
     # --- Banner inicial de la corrida completa ---
     print(f"\n{'#'*70}")
     print(f"#  F1 Line-Rate  —  Topología: {args.topology.upper()}")
     print(f"#  Experimentos: {experiments}")
+    print(f"#  Sizes: {sizes}")
     print(f"#  Protocolos:   {protocols}")
     if args.output_dir is not None:
         print(f"#  Output dir:   {args.output_dir}")
@@ -722,6 +739,7 @@ def main() -> None:
                 experiment=exp,
                 topology=args.topology,
                 protocols=protocols,
+                sizes=sizes,
                 output_dir_override=args.output_dir,
             )
         except KeyboardInterrupt:
@@ -739,7 +757,7 @@ def main() -> None:
     h, rem = divmod(int(elapsed), 3600)
     m, s = divmod(rem, 60)
     print(f"\n{'#'*70}")
-    print(f"#  Corrida F1 finalizada.")
+    print( "#  Corrida F1 finalizada.")
     print(f"#  Tiempo total: {h:d}h {m:02d}m {s:02d}s")
     print(f"#  Fin:          {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"{'#'*70}\n")
