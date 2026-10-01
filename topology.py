@@ -24,12 +24,12 @@ class SpineLeaf(Topo):
         leafs = []
         # Add spine switches
         for i in range(1, n_spine + 1):
-            spine = self.addSwitch(f's{i}', protocols='OpenFlow13')
+            spine = self.addSwitch(f's{i}', protocols='OpenFlow13', dpid=NODES[i-1])
             spines.append(spine)
 
         # Add leaf switches
         for j in range(1, n_leaf + 1):
-            leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13')
+            leaf = self.addSwitch(f's{j+n_spine}', protocols='OpenFlow13', dpid=NODES[j-1+n_spine])
             leafs.append(leaf)
             for spine in spines:
                 self.addLink(leaf, spine, bw=BANDWIDTH, delay=DELAY)
@@ -92,6 +92,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Define a topology in mininet.")
     parser.add_argument("-t", "--topology", type=str, default='sl',  help="Topology to test (Spine-leaf by default)")
+    parser.add_argument("-c", "--controller", type=str, default='172.17.0.2', help="ODL controller ip to use, 172.17.0.2 by default.")
     parser.add_argument("-V", "--verbose", action="store_true", help="Print DPID of the switches created")
     parser.add_argument("--fake_dpid", action="store_false", help="Use false DPID for the switches (False by default)")
     parser.add_argument("--n_spine", type=int, default=3, help="Number of spine switches (Only for spineleal, default 3)")
@@ -108,7 +109,7 @@ def main():
             print(f"Topology {args.topology} don't exists.")
             return 0
 
-    controller = RemoteController('odl', ip="172.17.0.2", port=6653)
+    controller = RemoteController('odl', ip=args.controller, port=6653)
     net = Mininet(topo=topo, link=TCLink, switch=OVSSwitch, controller=controller)
     try:
         net.start()
