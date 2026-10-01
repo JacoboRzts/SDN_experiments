@@ -95,8 +95,8 @@ def main():
     parser.add_argument("-c", "--controller", type=str, default='172.17.0.2', help="ODL controller ip to use, 172.17.0.2 by default.")
     parser.add_argument("-V", "--verbose", action="store_true", help="Print DPID of the switches created")
     parser.add_argument("--fake_dpid", action="store_false", help="Use false DPID for the switches (False by default)")
-    parser.add_argument("--n_spine", type=int, default=3, help="Number of spine switches (Only for spineleal, default 3)")
-    parser.add_argument("--n_leaf", type=int, default=2, help="Number of leaf switches (Only for spineleaf, default 2)")
+    parser.add_argument("--n_spine", type=int, default=2, help="Number of spine switches (Only for spineleal, default 3)")
+    parser.add_argument("--n_leaf", type=int, default=3, help="Number of leaf switches (Only for spineleaf, default 2)")
     parser.add_argument("--n_host", type=int, default=3, help="Number of host per leaf/edge switches. (3 by default)")
     args = parser.parse_args()
 
