@@ -357,7 +357,7 @@ def run_protocol(net, experiment, protocol, topology):
 
     for pkt_size in PKT_SIZES:
         if pkt_size == 1400:
-            pkt_size = 1460 if protocol == "TCP" else 1472
+            pkt_size = 1460 if protocol == "tcp" else 1472
         title(f"Experiment {experiment.upper()}\n  Protocol {protocol.upper()}\n  Packet Size: {pkt_size}B")
         pair_rows = {p["id"]: [] for p in pairs}
         for rep in range(1, REPS_MAX+1):
