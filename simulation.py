@@ -17,8 +17,8 @@ PKT_PAUSE = 10
 RSD_TARGET = 10.0
 REPS_MIN = 15
 REPS_MAX = 30
-PKT_SIZES = [64, 128, 256, 512, 1024]
-BANDWIDTH = "1G"
+PKT_SIZES = [64, 128, 256, 512, 1024, 1400]
+BANDWIDTH = "1g"
 CONGESTION_ALGORITHM = "cubic"
 
 PROTOCOL_OPTIONS = ["udp", "tcp"]
@@ -356,6 +356,8 @@ def run_protocol(net, experiment, protocol, topology):
     pairs = EXPERIMENTS[experiment]
 
     for pkt_size in PKT_SIZES:
+        if pkt_size == 1400:
+            pkt_size = 1460 if protocol == "TCP" else 1472
         title(f"Experiment {experiment.upper()}\n  Protocol {protocol.upper()}\n  Packet Size: {pkt_size}B")
         pair_rows = {p["id"]: [] for p in pairs}
         for rep in range(1, REPS_MAX+1):
