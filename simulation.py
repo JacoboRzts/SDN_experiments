@@ -408,7 +408,7 @@ def main():
     print()
 
     print("*** Building the network...")
-    net = build_network(topology=topology, controller_ip=args.controller_ip)
+    net = build_network(2, 3, 3, topology=topology, controller_ip=args.controller_ip)
     try:
         net.start()
         hosts = net.hosts
