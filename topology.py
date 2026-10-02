@@ -38,7 +38,7 @@ class SpineLeaf(Topo):
                 host_id = (j-1) * n_host + k
                 ip = f"10.0.{j}.{k}/16"
                 host = self.addHost(f'h{host_id}', ip=ip)
-                self.addLink(host, leaf, bw=BANDWIDTH, delay=DELAY)
+                self.addLink(host, leaf, port2=k+12, bw=BANDWIDTH, delay=DELAY)
 
 class FatTree(Topo):
     def __init__(self, n_core: int = 1, n_aggr: int = 2, n_edge: int = 2, n_host: int = 4, **opts):
