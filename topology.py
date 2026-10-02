@@ -57,7 +57,7 @@ class FatTree(Topo):
             node_idx += 1
             aggr_list.append(aggr)
             for idx, core in enumerate(core_list):
-                self.addLink(aggr, core, port1=2, port2=j + 2, bw=BANDWIDTH, delay=DELAY)
+                self.addLink(aggr, core, port1=1, port2=j + 1, bw=BANDWIDTH, delay=DELAY)
         # add edge switches
         for k in range(n_edge):
             edge = self.addSwitch(f"s{n_core + n_aggr + k + 1}", protocols='OpenFlow13', dpid=NODES[node_idx])
@@ -65,7 +65,7 @@ class FatTree(Topo):
             edge_list.append(edge)
             idx = k % len(aggr_list)
             aggr = aggr_list[idx]
-            self.addLink(edge, aggr, port1=2, port2=3, bw=BANDWIDTH, delay=DELAY)
+            self.addLink(edge, aggr, port1=1, port2=2, bw=BANDWIDTH, delay=DELAY)
             # add hosts
             for i in range(1, n_host + 1):
                 ip = f'10.0.{k + 1}.{i}/16'
